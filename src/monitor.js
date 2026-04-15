@@ -10,76 +10,61 @@ const { ticketUrl, targetDate, tickets } = require('./config');
 const log = require('./logger');
 
 const MONTHS_ES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const MONTHS_ES_SHORT = ['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC'];
 
 function parseTargetDate(iso) {
   const [y, m, d] = iso.split('-').map(Number);
-  return { year: y, month: m, day: d, monthName: MONTHS_ES[m - 1] };
+  return { year: y, month: m, day: d, monthName: MONTHS_ES[m - 1], monthShort: MONTHS_ES_SHORT[m - 1] };
 }
 
 async function pickDate(page, target) {
-  await page.waitForSelector('[role="grid"], [class*="calendar" i], [class*="datepicker" i]', { timeout: 15000 });
+  // Attendre que le calendrier Fever soit chargé (présence du titre + onglets)
+  await page.waitForSelector('text=/selecciona tipo de boleto|select/i', { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(800);
 
-  const exactLabel = `${target.day}-${target.month}-${target.year}`;
-  const anySelector = `[aria-label="${exactLabel}"]`;
+  // 1. Cliquer l'onglet du mois cible (ex: "MAY 2026")
+  const monthTabText = `${target.monthShort} ${target.year}`;
+  const monthTab = page.locator(`button:has-text("${monthTabText}"), [role="button"]:has-text("${monthTabText}"), [role="tab"]:has-text("${monthTabText}")`).first();
+  if (!(await monthTab.isVisible().catch(() => false))) {
+    log.warn({ monthTabText }, 'Onglet mois introuvable');
+    return false;
+  }
+  log.info({ monthTabText }, 'Clic onglet mois');
+  await monthTab.click();
+  await page.waitForTimeout(800);
 
-  // 1. Essayer de cliquer directement un onglet/bouton du mois cible (ex: "Mayo", "May")
-  const monthTabCandidates = [
-    page.getByRole('tab', { name: new RegExp(`^${target.monthName}$`, 'i') }),
-    page.getByRole('button', { name: new RegExp(`^${target.monthName}$`, 'i') }),
-    page.locator(`button:has-text("${target.monthName}"):not([disabled])`),
-    page.locator(`[role="tab"]:has-text("${target.monthName}")`),
+  // 2. Cliquer le jour dans la grille. Les cellules sont des éléments avec juste le numéro.
+  // Stratégies multiples pour trouver le bon "5" sans matcher "15", "25"...
+  const dayStr = String(target.day);
+  const dayCandidates = [
+    // Cellule dédiée (bouton/div) avec exactement le texte du jour
+    page.locator(`button:has-text("${dayStr}"):not(:has-text("${dayStr}0")):not(:has-text("${dayStr}1")):not(:has-text("${dayStr}2")):not(:has-text("${dayStr}3")):not(:has-text("${dayStr}4")):not(:has-text("${dayStr}5")):not(:has-text("${dayStr}6")):not(:has-text("${dayStr}7")):not(:has-text("${dayStr}8")):not(:has-text("${dayStr}9"))`),
+    page.getByRole('button', { name: new RegExp(`^\\s*${dayStr}\\s*$`) }),
+    page.getByRole('gridcell', { name: new RegExp(`^\\s*${dayStr}\\s*$`) }),
+    // Fallback: locator par texte exact
+    page.locator(`[role="button"]:text-is("${dayStr}")`),
   ];
-  for (const c of monthTabCandidates) {
+
+  for (const c of dayCandidates) {
     const el = c.first();
-    if (await el.count() > 0 && await el.isVisible().catch(() => false)) {
-      log.info({ monthName: target.monthName }, 'Clic onglet mois');
-      await el.click().catch(() => {});
-      await page.waitForTimeout(500);
-      break;
+    const count = await el.count().catch(() => 0);
+    if (count === 0) continue;
+    if (!(await el.isVisible().catch(() => false))) continue;
+    // Vérifier que le jour n'est pas désactivé
+    const disabled = await el.getAttribute('disabled').catch(() => null);
+    const ariaDisabled = await el.getAttribute('aria-disabled').catch(() => null);
+    if (disabled != null || ariaDisabled === 'true') {
+      log.warn({ dayStr }, 'Jour présent mais désactivé');
+      continue;
     }
+    log.info({ dayStr }, 'Clic jour cible');
+    await el.scrollIntoViewIfNeeded().catch(() => {});
+    await el.click();
+    await page.waitForTimeout(500);
+    return true;
   }
 
-  // 2. Chercher la cellule exacte, sinon naviguer avec flèche "mois suivant"
-  async function findNextBtn() {
-    const candidates = [
-      'button.ngb-dp-arrow-btn:nth-of-type(2):not([disabled])',
-      'button.ngb-dp-arrow-btn:last-of-type:not([disabled])',
-      '[aria-label*="Next" i]:not([disabled])',
-      '[aria-label*="siguiente" i]:not([disabled])',
-      '[aria-label*="suivant" i]:not([disabled])',
-      '.ngb-dp-arrow.right button',
-    ];
-    for (const sel of candidates) {
-      const loc = page.locator(sel).first();
-      if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) return loc;
-    }
-    return null;
-  }
-
-  for (let i = 0; i < 24; i++) {
-    const cell = page.locator(anySelector).first();
-    if (await cell.count() > 0) {
-      const disabled = await cell.getAttribute('aria-disabled').catch(() => null);
-      const cls = (await cell.getAttribute('class').catch(() => '')) || '';
-      const hidden = cls.includes('hidden') || cls.includes('outside') || cls.includes('disabled');
-      if (disabled !== 'true' && !hidden) {
-        log.info({ exactLabel, cls }, 'Clic date cible');
-        await cell.scrollIntoViewIfNeeded().catch(() => {});
-        await cell.click();
-        return true;
-      }
-      log.warn({ exactLabel, disabled, cls, iter: i }, 'Date trouvée mais non cliquable, nav suivant');
-    } else {
-      log.info({ iter: i }, 'Date cible absente du DOM, nav suivant');
-    }
-    const next = await findNextBtn();
-    if (!next) {
-      log.warn({ i }, 'Bouton "mois suivant" introuvable, abandon');
-      break;
-    }
-    await next.click();
-    await page.waitForTimeout(600);
-  }
+  log.warn({ dayStr }, 'Aucune cellule jour cliquable trouvée');
   return false;
 }
 
