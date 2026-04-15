@@ -65,9 +65,13 @@ async function showSlotsForDate(date) {
     ]);
     if (r.error) {
       let detail = `❌ <b>Erreur :</b> <code>${r.error}</code>`;
-      if (r.diag && r.diag.tabTexts) {
-        const txtList = r.diag.tabTexts.map(t => `• <code>${t.text}</code> (${t.tag}${t.role ? ' role=' + t.role : ''})`).join('\n');
-        detail += `\n\n<b>Éléments contenant 2026 sur la page :</b>\n${txtList || '<i>aucun</i>'}`;
+      if (r.diag) {
+        detail += `\n\n<b>URL :</b> <code>${r.diag.url || '?'}</code>`;
+        detail += `\n<b>Titre :</b> ${r.diag.title || '?'}`;
+        detail += `\n<b>iframes :</b> ${r.diag.frameCount || 0}`;
+        if (r.diag.foundInFrame) detail += ` (calendrier dans iframe ${r.diag.foundInFrame.slice(0, 60)})`;
+        const txtList = (r.diag.tabTexts || []).map(t => `• <code>${t.text}</code> (${t.tag}${t.role ? ' role=' + t.role : ''})`).join('\n');
+        detail += `\n\n<b>Éléments contenant 2026 :</b>\n${txtList || '<i>aucun</i>'}`;
         detail += `\n\n<b>Clic onglet mois réussi ?</b> ${r.diag.monthClicked ? '✅' : '❌'}`;
       }
       await wa.send(detail, { buttons: mainMenu() });

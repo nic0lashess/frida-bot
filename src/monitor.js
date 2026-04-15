@@ -18,32 +18,61 @@ function parseTargetDate(iso) {
 }
 
 async function pickDate(page, target, diag = {}) {
-  await page.waitForSelector('text=/selecciona tipo de boleto|select/i', { timeout: 20000 }).catch(() => {});
-  await page.waitForTimeout(800);
+  // Attente agressive du calendrier avec plusieurs signaux possibles
+  const waitPromises = [
+    page.waitForSelector('text=/ABR\\s*\\d{4}|MAY\\s*\\d{4}|ENE\\s*\\d{4}/i', { timeout: 25000 }).catch(() => null),
+    page.waitForSelector('text=/selecciona tipo de boleto/i', { timeout: 25000 }).catch(() => null),
+  ];
+  await Promise.race(waitPromises);
+  await page.waitForTimeout(2000); // laisse le widget finir son rendu
+
+  diag.url = page.url();
+  diag.title = await page.title().catch(() => '');
+
+  // Chercher aussi dans les iframes
+  const frames = page.frames();
+  diag.frameCount = frames.length;
+  diag.frameUrls = frames.map(f => f.url()).slice(0, 5);
+
+  // Fonction pour scanner un contexte (page ou frame)
+  async function scan(ctx) {
+    return ctx.evaluate((yearStr) => {
+      const out = [];
+      const all = document.querySelectorAll('*');
+      const seen = new Set();
+      for (const el of all) {
+        if (el.children.length > 0) continue;
+        const t = (el.innerText || el.textContent || '').trim();
+        if (!t || !t.includes(yearStr) || t.length > 40) continue;
+        if (seen.has(t)) continue;
+        seen.add(t);
+        out.push({
+          text: t,
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute('role') || null,
+          cls: (el.getAttribute('class') || '').slice(0, 60),
+        });
+      }
+      return out;
+    }, String(target.year));
+  }
+
+  let detected = await scan(page).catch(() => []);
+  // Si rien trouvé en main frame, scanner chaque iframe
+  if (detected.length === 0) {
+    for (const f of frames) {
+      if (f === page.mainFrame()) continue;
+      const found = await scan(f).catch(() => []);
+      if (found.length > 0) {
+        detected = found;
+        diag.foundInFrame = f.url();
+        break;
+      }
+    }
+  }
+  diag.tabTexts = detected;
 
   const monthTabRegex = new RegExp(`${target.monthShort}\\s*${target.year}`, 'i');
-
-  // Diagnostic : scanner TOUS les éléments (pas juste les buttons) contenant "2026"
-  const detected = await page.evaluate((yearStr) => {
-    const out = [];
-    const all = document.querySelectorAll('*');
-    const seen = new Set();
-    for (const el of all) {
-      if (el.children.length > 0) continue; // feuilles uniquement
-      const t = (el.innerText || el.textContent || '').trim();
-      if (!t || !t.includes(yearStr) || t.length > 40) continue;
-      if (seen.has(t)) continue;
-      seen.add(t);
-      out.push({
-        text: t,
-        tag: el.tagName.toLowerCase(),
-        role: el.getAttribute('role') || null,
-        cls: (el.getAttribute('class') || '').slice(0, 60),
-      });
-    }
-    return out;
-  }, String(target.year));
-  diag.tabTexts = detected;
   log.info({ detected }, 'Éléments avec année détectés');
 
   // Multi-stratégie de clic sur l'onglet mois
