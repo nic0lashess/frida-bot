@@ -90,8 +90,8 @@ async function readSlots(page) {
   return slots;
 }
 
-async function checkAvailability() {
-  const target = parseTargetDate(targetDate);
+async function checkAvailability(dateOverride) {
+  const target = parseTargetDate(dateOverride || targetDate);
   const { browser, ctx } = await newContext();
   const page = await ctx.newPage();
   try {

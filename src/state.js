@@ -11,6 +11,7 @@ const DEFAULT = {
   paymentUrl: null,
   paymentSentAt: null,
   lastSeenSlots: [],              // pour ne pas re-notifier
+  activeDate: null,               // null = utilise TARGET_DATE env, sinon override runtime
 };
 
 function load() {
@@ -28,7 +29,8 @@ function save(state) {
 }
 
 function reset() {
-  save({ ...DEFAULT, lastSeenSlots: load().lastSeenSlots });
+  const prev = load();
+  save({ ...DEFAULT, lastSeenSlots: prev.lastSeenSlots, activeDate: prev.activeDate });
 }
 
 module.exports = { load, save, reset, DEFAULT };

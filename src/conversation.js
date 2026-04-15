@@ -6,6 +6,19 @@ const { targetDate, tickets, slotProposalTimeoutMin, paymentLinkTimeoutMin, chec
 
 let activeBrowser = null;
 
+function getActiveDate() {
+  return state.load().activeDate || targetDate;
+}
+
+function setActiveDate(iso) {
+  const s = state.load();
+  s.activeDate = iso;
+  s.lastSeenSlots = [];
+  state.save(s);
+}
+
+const QUICK_DATES = ['2026-05-05', '2026-05-06', '2026-05-07', '2026-05-08'];
+
 function cronToHuman(expr) {
   const m = expr.match(/^\*\/(\d+) \* \* \* \*$/);
   if (m) return `toutes les ${m[1]} min`;
@@ -55,10 +68,20 @@ function slotButtons(slots) {
   return rows;
 }
 
+function dateButtonRow() {
+  const active = getActiveDate();
+  return QUICK_DATES.map(d => {
+    const [_, m, day] = d.split('-');
+    const mark = d === active ? '✅ ' : '';
+    return { text: `${mark}${parseInt(day, 10)}/${parseInt(m, 10)}`, callback_data: `date:${d}` };
+  });
+}
+
 function mainMenuButtons() {
   return [
-    [{ text: '🔍 Vérifier maintenant', callback_data: 'check' }],
-    [{ text: '📊 Statut', callback_data: 'status' }, { text: '🔄 Reset', callback_data: 'cancel' }],
+    dateButtonRow(),
+    [{ text: '🔍 Vérifier', callback_data: 'check' }, { text: '📊 Statut', callback_data: 'status' }],
+    [{ text: '🔄 Reset', callback_data: 'cancel' }],
   ];
 }
 
@@ -66,7 +89,7 @@ async function sendGreeting() {
   const text =
     `<b>🎨 Frida-bot activé</b>\n\n` +
     `Je surveille pour toi la billetterie Casa Azul.\n\n` +
-    `📅 Date visée : <b>${fmtDate(targetDate)}</b>\n` +
+    `📅 Date visée : <b>${fmtDate(getActiveDate())}</b>\n` +
     `🎟 Places : <b>${tickets}</b>\n` +
     `⏱ Vérification auto : <b>${cronToHuman(checkCron)}</b>\n\n` +
     `Je t'envoie un message dès qu'un créneau apparaît.\n` +
@@ -87,7 +110,7 @@ async function sendAvailabilityReport(result, { force = false } = {}) {
   const all = result.all || result.slots || [];
   if (!all.length) {
     await wa.send(
-      `🔴 <b>Aucun créneau dispo</b> pour le ${fmtDate(targetDate)}.\n\n` +
+      `🔴 <b>Aucun créneau dispo</b> pour le ${fmtDate(getActiveDate())}.\n\n` +
       `Je continue à surveiller.`,
       { buttons: mainMenuButtons() }
     );
@@ -96,7 +119,7 @@ async function sendAvailabilityReport(result, { force = false } = {}) {
 
   const usable = all.filter(s => s.available == null || s.available >= tickets);
   const text =
-    `<b>🎨 Casa Azul — ${fmtDate(targetDate)}</b>\n` +
+    `<b>🎨 Casa Azul — ${fmtDate(getActiveDate())}</b>\n` +
     `<i>${usable.length} créneau(x) OK pour ${tickets} places / ${all.length} au total</i>\n\n` +
     fmtSlotsRich(all) + '\n\n' +
     (usable.length
@@ -155,8 +178,9 @@ async function startBooking(slotTime) {
   s.selectedSlot = slot;
   state.save(s);
 
-  await wa.send(`⏳ Préparation du panier pour <b>${slot.time}</b>...`);
-  const result = await bookSlot({ targetDate, slotTime: slot.time });
+  const date = getActiveDate();
+  await wa.send(`⏳ Préparation du panier pour le <b>${fmtDate(date)}</b> à <b>${slot.time}</b>...`);
+  const result = await bookSlot({ targetDate: date, slotTime: slot.time });
   if (!result.ok) {
     await wa.send(`❌ Booking échoué :\n<code>${result.error}</code>`, { buttons: mainMenuButtons() });
     if (result.screenshot) await wa.sendImage(result.screenshot, 'Dernière vue avant erreur');
@@ -174,7 +198,7 @@ async function startBooking(slotTime) {
 
   const caption =
     `✅ <b>Panier prêt</b>\n` +
-    `${tickets} places — ${fmtDate(targetDate)} ${slot.time}\n\n` +
+    `${tickets} places — ${fmtDate(getActiveDate())} ${slot.time}\n\n` +
     `👉 <a href="${result.paymentUrl}">Ouvrir le paiement</a>\n\n` +
     `Tape ce lien ou clique le bouton, entre ta CB et valide le 3DS.\n` +
     `Réponds <b>/done</b> une fois payé, ou <b>/cancel</b> pour annuler.`;
@@ -196,17 +220,31 @@ async function handleUserMessage(msg) {
   const text = raw.toLowerCase();
   const s = state.load();
 
-  // Callback buttons : "book:10:00", "check", "cancel", "status", "done"
+  // Callback buttons : "book:10:00", "date:2026-05-05", "check", "cancel", "status", "done"
   if (msg._isCallback) {
     if (raw.startsWith('book:')) {
       const time = raw.slice(5);
       await startBooking(time);
       return;
     }
+    if (raw.startsWith('date:')) {
+      const iso = raw.slice(5);
+      setActiveDate(iso);
+      await wa.send(`📅 Date active : <b>${fmtDate(iso)}</b>`, { buttons: mainMenuButtons() });
+      return;
+    }
     if (raw === 'check') { await forceCheck(); return; }
     if (raw === 'cancel') { await resetAll(); return; }
     if (raw === 'status') { await sendStatus(); return; }
     if (raw === 'done') { await markPaid(); return; }
+  }
+
+  // /date YYYY-MM-DD
+  const dateMatch = text.match(/^\/date\s+(\d{4}-\d{2}-\d{2})$/);
+  if (dateMatch) {
+    setActiveDate(dateMatch[1]);
+    await wa.send(`📅 Date active : <b>${fmtDate(dateMatch[1])}</b>`, { buttons: mainMenuButtons() });
+    return;
   }
 
   // Commandes textuelles
@@ -232,11 +270,12 @@ async function handleUserMessage(msg) {
 }
 
 async function forceCheck() {
-  await wa.send('🔍 Je vérifie la dispo...');
+  const date = getActiveDate();
+  await wa.send(`🔍 Je vérifie la dispo pour le <b>${fmtDate(date)}</b>...`);
   try {
     const { checkAvailability } = require('./monitor');
     const r = await Promise.race([
-      checkAvailability(),
+      checkAvailability(date),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 90s')), 90_000)),
     ]);
     await sendAvailabilityReport(r, { force: true });
@@ -258,7 +297,7 @@ async function sendStatus() {
   await wa.send(
     `<b>📊 Statut</b>\n\n` +
     `État : ${stateHuman}\n` +
-    `Date cible : ${fmtDate(targetDate)}\n` +
+    `Date cible : ${fmtDate(getActiveDate())}\n` +
     `Places : ${tickets}\n` +
     `Vérif auto : ${cronToHuman(checkCron)}`,
     { buttons: mainMenuButtons() }
