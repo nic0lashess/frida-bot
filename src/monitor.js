@@ -106,35 +106,62 @@ async function pickDate(page, target, diag = {}) {
   }
   await page.waitForTimeout(1200);
 
-  // 2. Cliquer le jour dans la grille. Les cellules sont des éléments avec juste le numéro.
-  // Stratégies multiples pour trouver le bon "5" sans matcher "15", "25"...
+  // 2. Cliquer le jour dans la grille
   const dayStr = String(target.day);
-  const dayCandidates = [
-    // Cellule dédiée (bouton/div) avec exactement le texte du jour
-    page.locator(`button:has-text("${dayStr}"):not(:has-text("${dayStr}0")):not(:has-text("${dayStr}1")):not(:has-text("${dayStr}2")):not(:has-text("${dayStr}3")):not(:has-text("${dayStr}4")):not(:has-text("${dayStr}5")):not(:has-text("${dayStr}6")):not(:has-text("${dayStr}7")):not(:has-text("${dayStr}8")):not(:has-text("${dayStr}9"))`),
-    page.getByRole('button', { name: new RegExp(`^\\s*${dayStr}\\s*$`) }),
-    page.getByRole('gridcell', { name: new RegExp(`^\\s*${dayStr}\\s*$`) }),
-    // Fallback: locator par texte exact
-    page.locator(`[role="button"]:text-is("${dayStr}")`),
-  ];
 
-  for (const c of dayCandidates) {
-    const el = c.first();
-    const count = await el.count().catch(() => 0);
-    if (count === 0) continue;
-    if (!(await el.isVisible().catch(() => false))) continue;
-    // Vérifier que le jour n'est pas désactivé
-    const disabled = await el.getAttribute('disabled').catch(() => null);
-    const ariaDisabled = await el.getAttribute('aria-disabled').catch(() => null);
-    if (disabled != null || ariaDisabled === 'true') {
-      log.warn({ dayStr }, 'Jour présent mais désactivé');
-      continue;
+  // Scan diagnostic : tous les éléments feuilles avec exactement "5" (ou autre) comme texte
+  const dayCandidates = await page.evaluate((d) => {
+    const out = [];
+    const all = document.querySelectorAll('*');
+    for (const el of all) {
+      if (el.children.length > 0) continue;
+      const t = (el.innerText || el.textContent || '').trim();
+      if (t !== d) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      const parentCls = (el.parentElement?.getAttribute('class') || '').slice(0, 60);
+      const selfCls = (el.getAttribute('class') || '').slice(0, 60);
+      // Générer un sélecteur pour cet élément via un identifiant unique temporaire
+      const tempId = 'daycell-' + Math.random().toString(36).slice(2, 10);
+      el.setAttribute('data-bot-pick', tempId);
+      out.push({
+        tag: el.tagName.toLowerCase(),
+        parentTag: el.parentElement?.tagName?.toLowerCase() || null,
+        parentCls,
+        selfCls,
+        role: el.getAttribute('role') || null,
+        ariaDisabled: el.getAttribute('aria-disabled'),
+        tempId,
+        x: Math.round(rect.x), y: Math.round(rect.y),
+      });
     }
-    log.info({ dayStr }, 'Clic jour cible');
-    await el.scrollIntoViewIfNeeded().catch(() => {});
-    await el.click();
-    await page.waitForTimeout(500);
-    return true;
+    return out;
+  }, dayStr);
+  diag.dayCandidates = dayCandidates;
+  log.info({ dayStr, count: dayCandidates.length, dayCandidates }, 'Candidats jour détectés');
+
+  // Essayer chaque candidat : prendre le premier qui est dans la zone calendrier (x > 300 grossièrement) et cliquable
+  for (const c of dayCandidates) {
+    // On essaie d'abord le parent (souvent la vraie cellule cliquable), puis l'élément lui-même
+    for (const targetId of [c.tempId]) {
+      const loc = page.locator(`[data-bot-pick="${targetId}"]`).first();
+      // Essayer de cliquer sur le parent (souvent la carte cliquable)
+      const parentLoc = loc.locator('xpath=..').first();
+      for (const trial of [parentLoc, loc]) {
+        try {
+          const ariaDisabled = await trial.getAttribute('aria-disabled').catch(() => null);
+          if (ariaDisabled === 'true') continue;
+          await trial.scrollIntoViewIfNeeded().catch(() => {});
+          await trial.click({ force: true, timeout: 3000 });
+          log.info({ dayStr, tempId: targetId, via: trial === parentLoc ? 'parent' : 'self' }, 'Clic jour réussi');
+          diag.dayClickedVia = trial === parentLoc ? 'parent' : 'self';
+          await page.waitForTimeout(600);
+          return true;
+        } catch (e) {
+          log.warn({ err: e.message, tempId: targetId }, 'Tentative clic jour échouée');
+        }
+      }
+    }
   }
 
   log.warn({ dayStr }, 'Aucune cellule jour cliquable trouvée');
