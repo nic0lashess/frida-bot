@@ -22,34 +22,45 @@ async function pickDate(page, target) {
 
   // Le calendrier ngb-datepicker utilise aria-label="D-M-YYYY" (ex: "4-5-2026").
   const exactLabel = `${target.day}-${target.month}-${target.year}`;
-  const cellSelector = `[aria-label="${exactLabel}"]:not(.disabled):not([aria-disabled="true"])`;
+  const enabledSelector = `[aria-label="${exactLabel}"]:not(.disabled):not([aria-disabled="true"])`;
+  const anySelector = `[aria-label="${exactLabel}"]`;
 
-  // Naviguer vers le bon mois : on clique "next" jusqu'à ce que la cellule cible soit présente (activable).
-  for (let i = 0; i < 24; i++) {
-    const cell = page.locator(cellSelector).first();
-    if (await cell.count() > 0 && await cell.isVisible().catch(() => false)) {
-      await cell.click();
-      return true;
+  async function findNextBtn() {
+    const candidates = [
+      'button.ngb-dp-arrow-btn:not([disabled]):nth-of-type(2)',
+      'button.ngb-dp-arrow-btn:not([disabled]):last-of-type',
+      '[aria-label*="Next" i]:not([disabled])',
+      '[aria-label*="siguiente" i]:not([disabled])',
+      '[aria-label*="suivant" i]:not([disabled])',
+      '.ngb-dp-arrow.right button',
+      'button:has(.ngb-dp-navigation-chevron):nth-of-type(2)',
+    ];
+    for (const sel of candidates) {
+      const loc = page.locator(sel).first();
+      if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) return loc;
     }
-    // Chercher le bouton "next" — peut être une flèche ou aria-label spécifique
-    const next = page.locator('[aria-label*="Next" i], [aria-label*="siguiente" i], button:has-text(">"):not([disabled])').first();
-    if (!(await next.isVisible().catch(() => false))) {
-      log.warn({ i }, 'Bouton next introuvable');
+    return null;
+  }
+
+  for (let i = 0; i < 24; i++) {
+    const cell = page.locator(anySelector).first();
+    if (await cell.count() > 0) {
+      const disabled = await cell.getAttribute('aria-disabled').catch(() => null);
+      const cls = (await cell.getAttribute('class').catch(() => '')) || '';
+      if (disabled !== 'true' && !cls.includes('disabled')) {
+        await cell.scrollIntoViewIfNeeded().catch(() => {});
+        await cell.click();
+        return true;
+      }
+      log.warn({ exactLabel, disabled, cls }, 'Date présente mais désactivée, tentative nav mois suivant');
+    }
+    const next = await findNextBtn();
+    if (!next) {
+      log.warn({ i }, 'Bouton "mois suivant" introuvable');
       break;
     }
     await next.click();
-    await page.waitForTimeout(400);
-  }
-
-  // Dernier fallback : cellule avec aria-label exact même si on ne l'a pas trouvée via nav
-  const fallback = page.locator(`[aria-label="${exactLabel}"]`).first();
-  if (await fallback.isVisible().catch(() => false)) {
-    const disabled = await fallback.getAttribute('aria-disabled');
-    if (disabled !== 'true') {
-      await fallback.click();
-      return true;
-    }
-    log.warn({ exactLabel }, 'Date cible trouvée mais désactivée (sold out ou fermée)');
+    await page.waitForTimeout(500);
   }
   return false;
 }

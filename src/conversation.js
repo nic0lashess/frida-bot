@@ -65,6 +65,9 @@ async function showSlotsForDate(date) {
     ]);
     if (r.error) {
       await wa.send(`❌ Erreur : <code>${r.error}</code>`, { buttons: mainMenu() });
+      if (r.screenshot) {
+        try { await wa.sendImage(r.screenshot, 'État du site au moment de l\'erreur'); } catch {}
+      }
       return;
     }
     const all = r.all || r.slots || [];
