@@ -6,7 +6,7 @@ const { headed } = require('./config');
 async function newContext() {
   const browser = await chromium.launch({
     headless: !headed,
-    args: ['--disable-blink-features=AutomationControlled'],
+    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
   const ctx = await browser.newContext({
     locale: 'es-MX',

@@ -233,9 +233,17 @@ async function handleUserMessage(msg) {
 
 async function forceCheck() {
   await wa.send('🔍 Je vérifie la dispo...');
-  const { checkAvailability } = require('./monitor');
-  const r = await checkAvailability();
-  await sendAvailabilityReport(r, { force: true });
+  try {
+    const { checkAvailability } = require('./monitor');
+    const r = await Promise.race([
+      checkAvailability(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 90s')), 90_000)),
+    ]);
+    await sendAvailabilityReport(r, { force: true });
+  } catch (e) {
+    log.error({ err: e.message, stack: e.stack }, 'forceCheck crash');
+    await wa.send(`❌ Le check a planté :\n<code>${e.message}</code>`, { buttons: mainMenuButtons() });
+  }
 }
 
 async function sendStatus() {
