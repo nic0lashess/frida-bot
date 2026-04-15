@@ -1,30 +1,13 @@
 const log = require('./logger');
 const state = require('./state');
+const purchases = require('./purchases');
 const wa = require('./messenger');
 const { bookSlot } = require('./booking');
-const { targetDate, tickets, slotProposalTimeoutMin, paymentLinkTimeoutMin, checkCron } = require('./config');
+const { targetDate, tickets, slotProposalTimeoutMin, paymentLinkTimeoutMin } = require('./config');
 
 let activeBrowser = null;
 
-function getActiveDate() {
-  return state.load().activeDate || targetDate;
-}
-
-function setActiveDate(iso) {
-  const s = state.load();
-  s.activeDate = iso;
-  s.lastSeenSlots = [];
-  state.save(s);
-}
-
 const QUICK_DATES = ['2026-05-05', '2026-05-06', '2026-05-07', '2026-05-08'];
-
-function cronToHuman(expr) {
-  const m = expr.match(/^\*\/(\d+) \* \* \* \*$/);
-  if (m) return `toutes les ${m[1]} min`;
-  if (expr === '* * * * *') return 'chaque minute';
-  return expr;
-}
 
 function fmtDate(iso) {
   const [y, m, d] = iso.split('-');
@@ -32,301 +15,214 @@ function fmtDate(iso) {
   return `${parseInt(d, 10)} ${months[parseInt(m, 10) - 1]} ${y}`;
 }
 
+function shortDate(iso) {
+  const [, m, d] = iso.split('-');
+  return `${parseInt(d, 10)}/${parseInt(m, 10)}`;
+}
+
 function slotIndicator(s) {
-  if (s.available != null) {
-    if (s.available >= tickets) return '🟢';
-    return '🟡';
-  }
-  if (s.lowAvailability) return '🟡';
-  return '🟢';
+  if (s.available != null) return s.available >= tickets ? '🟢' : '🟡';
+  return s.lowAvailability ? '🟡' : '🟢';
 }
 
-function slotLabel(s) {
-  if (s.available != null) return `${s.available} places`;
-  if (s.lowAvailability) return 'peu de places';
-  return 'dispo';
+function dateRow() {
+  return QUICK_DATES.map(d => ({ text: shortDate(d), callback_data: `pickdate:${d}` }));
 }
 
-function fmtSlotsRich(slots) {
-  if (!slots.length) return '<i>Aucun créneau trouvé.</i>';
-  return slots.map(s => `${slotIndicator(s)} <b>${s.time}</b> — ${slotLabel(s)}`).join('\n');
-}
-
-function slotButtons(slots) {
-  const usable = slots.filter(s => s.available == null || s.available >= tickets);
-  const rows = [];
-  for (let i = 0; i < usable.length; i += 2) {
-    rows.push(usable.slice(i, i + 2).map(s => ({
-      text: `🎟 ${s.time}`,
-      callback_data: `book:${s.time}`,
-    })));
-  }
-  rows.push([
-    { text: '🔄 Re-vérifier', callback_data: 'check' },
-    { text: '❌ Annuler', callback_data: 'cancel' },
-  ]);
-  return rows;
-}
-
-function dateButtonRow() {
-  const active = getActiveDate();
-  return QUICK_DATES.map(d => {
-    const [_, m, day] = d.split('-');
-    const mark = d === active ? '✅ ' : '';
-    return { text: `${mark}${parseInt(day, 10)}/${parseInt(m, 10)}`, callback_data: `date:${d}` };
-  });
-}
-
-function mainMenuButtons() {
+function mainMenu() {
   return [
-    dateButtonRow(),
-    [{ text: '🔍 Vérifier', callback_data: 'check' }, { text: '📊 Statut', callback_data: 'status' }],
-    [{ text: '🔄 Reset', callback_data: 'cancel' }],
+    dateRow(),
+    [{ text: '📊 Mon stock', callback_data: 'stock' }, { text: '❓ Aide', callback_data: 'help' }],
   ];
+}
+
+function renderStock() {
+  const list = purchases.load();
+  if (!list.length) return '<i>Aucune place réservée pour l\'instant.</i>';
+  return list.map(p => {
+    const icon = p.status === 'paid' ? '🟩' : p.status === 'pending' ? '🟦' : '⬜';
+    return `${icon} <b>${fmtDate(p.date)}</b> à ${p.time}  <i>(${p.status})</i>`;
+  }).join('\n');
 }
 
 async function sendGreeting() {
   const text =
-    `<b>🎨 Frida-bot activé</b>\n\n` +
-    `Je surveille pour toi la billetterie Casa Azul.\n\n` +
-    `📅 Date visée : <b>${fmtDate(getActiveDate())}</b>\n` +
-    `🎟 Places : <b>${tickets}</b>\n` +
-    `⏱ Vérification auto : <b>${cronToHuman(checkCron)}</b>\n\n` +
-    `Je t'envoie un message dès qu'un créneau apparaît.\n` +
-    `Tu peux aussi forcer une vérification quand tu veux.`;
-  await wa.send(text, { buttons: mainMenuButtons() });
+    `<b>🎨 Bot Frida Kahlo</b>\n\n` +
+    `<b>Tes places réservées :</b>\n` +
+    renderStock() + `\n\n` +
+    `<b>Acheter une nouvelle place ?</b>\n` +
+    `Choisis une date ci-dessous.`;
+  await wa.send(text, { buttons: mainMenu() });
 }
 
-function newSlots(current, lastSeen) {
-  const lastTimes = new Set((lastSeen || []).map(s => s.time));
-  return current.filter(s => !lastTimes.has(s.time));
-}
-
-async function sendAvailabilityReport(result, { force = false } = {}) {
-  if (result.error) {
-    await wa.send(`❌ <b>Erreur</b> lors de la vérif :\n<code>${result.error}</code>`, { buttons: mainMenuButtons() });
-    return;
-  }
-  const all = result.all || result.slots || [];
-  if (!all.length) {
-    await wa.send(
-      `🔴 <b>Aucun créneau dispo</b> pour le ${fmtDate(getActiveDate())}.\n\n` +
-      `Je continue à surveiller.`,
-      { buttons: mainMenuButtons() }
-    );
-    return;
-  }
-
-  const usable = all.filter(s => s.available == null || s.available >= tickets);
-  const text =
-    `<b>🎨 Casa Azul — ${fmtDate(getActiveDate())}</b>\n` +
-    `<i>${usable.length} créneau(x) OK pour ${tickets} places / ${all.length} au total</i>\n\n` +
-    fmtSlotsRich(all) + '\n\n' +
-    (usable.length
-      ? `👇 Choisis un horaire pour réserver :`
-      : `Aucun créneau avec assez de places. Je continue à surveiller.`);
-
-  await wa.send(text, { buttons: slotButtons(all) });
-
-  if (usable.length) {
-    const s = state.load();
-    s.conversation = 'SLOTS_PROPOSED';
-    s.proposedSlots = usable;
-    s.proposedAt = new Date().toISOString();
-    s.lastSeenSlots = all;
-    state.save(s);
-  }
-}
-
-async function handleSlotsFound(slots) {
-  const s = state.load();
-
-  if (s.conversation === 'BOOKING' || s.conversation === 'PAYMENT_LINK_SENT') {
-    s.lastSeenSlots = slots;
-    state.save(s);
-    return;
-  }
-
-  if (s.conversation === 'SLOTS_PROPOSED' && s.proposedAt) {
-    const ageMin = (Date.now() - new Date(s.proposedAt).getTime()) / 60000;
-    if (ageMin > slotProposalTimeoutMin) {
-      log.info('Proposition expirée, retour IDLE');
-      state.reset();
-    }
-  }
-
-  const fresh = state.load();
-  const candidates = fresh.conversation === 'SLOTS_PROPOSED'
-    ? newSlots(slots, fresh.proposedSlots)
-    : newSlots(slots, fresh.lastSeenSlots);
-
-  if (candidates.length === 0) {
-    fresh.lastSeenSlots = slots;
-    state.save(fresh);
-    return;
-  }
-
-  log.info({ count: candidates.length }, 'Notification créneaux');
-  await sendAvailabilityReport({ all: slots });
-}
-
-async function startBooking(slotTime) {
-  const s = state.load();
-  const slot = (s.proposedSlots || []).find(x => x.time === slotTime)
-    || { time: slotTime, available: null };
-  s.conversation = 'BOOKING';
-  s.selectedSlot = slot;
-  state.save(s);
-
-  const date = getActiveDate();
-  await wa.send(`⏳ Préparation du panier pour le <b>${fmtDate(date)}</b> à <b>${slot.time}</b>...`);
-  const result = await bookSlot({ targetDate: date, slotTime: slot.time });
-  if (!result.ok) {
-    await wa.send(`❌ Booking échoué :\n<code>${result.error}</code>`, { buttons: mainMenuButtons() });
-    if (result.screenshot) await wa.sendImage(result.screenshot, 'Dernière vue avant erreur');
-    state.reset();
-    return;
-  }
-  if (result.keepAlive && result.keepAlive.browser) {
-    activeBrowser = result.keepAlive.browser;
-  }
-  const s2 = state.load();
-  s2.conversation = 'PAYMENT_LINK_SENT';
-  s2.paymentUrl = result.paymentUrl;
-  s2.paymentSentAt = new Date().toISOString();
-  state.save(s2);
-
-  const caption =
-    `✅ <b>Panier prêt</b>\n` +
-    `${tickets} places — ${fmtDate(getActiveDate())} ${slot.time}\n\n` +
-    `👉 <a href="${result.paymentUrl}">Ouvrir le paiement</a>\n\n` +
-    `Tape ce lien ou clique le bouton, entre ta CB et valide le 3DS.\n` +
-    `Réponds <b>/done</b> une fois payé, ou <b>/cancel</b> pour annuler.`;
-
-  const buttons = [
-    [{ text: '💳 Payer maintenant', url: result.paymentUrl }],
-    [{ text: '✅ J\'ai payé', callback_data: 'done' }, { text: '❌ Annuler', callback_data: 'cancel' }],
-  ];
-
-  if (result.screenshot) {
-    await wa.sendImage(result.screenshot, caption, { buttons });
-  } else {
-    await wa.send(caption, { buttons });
-  }
-}
-
-async function handleUserMessage(msg) {
-  const raw = (msg.body || '').trim();
-  const text = raw.toLowerCase();
-  const s = state.load();
-
-  // Callback buttons : "book:10:00", "date:2026-05-05", "check", "cancel", "status", "done"
-  if (msg._isCallback) {
-    if (raw.startsWith('book:')) {
-      const time = raw.slice(5);
-      await startBooking(time);
-      return;
-    }
-    if (raw.startsWith('date:')) {
-      const iso = raw.slice(5);
-      setActiveDate(iso);
-      await wa.send(`📅 Date active : <b>${fmtDate(iso)}</b>`, { buttons: mainMenuButtons() });
-      return;
-    }
-    if (raw === 'check') { await forceCheck(); return; }
-    if (raw === 'cancel') { await resetAll(); return; }
-    if (raw === 'status') { await sendStatus(); return; }
-    if (raw === 'done') { await markPaid(); return; }
-  }
-
-  // /date YYYY-MM-DD
-  const dateMatch = text.match(/^\/date\s+(\d{4}-\d{2}-\d{2})$/);
-  if (dateMatch) {
-    setActiveDate(dateMatch[1]);
-    await wa.send(`📅 Date active : <b>${fmtDate(dateMatch[1])}</b>`, { buttons: mainMenuButtons() });
-    return;
-  }
-
-  // Commandes textuelles
-  if (text === '/start' || text === 'start') { await sendGreeting(); await forceCheck(); return; }
-  if (text === '/help' || text === 'help') { await sendHelp(); return; }
-  if (text === '/status') { await sendStatus(); return; }
-  if (text === '/check') { await forceCheck(); return; }
-  if (text === '/reset' || text === '/cancel') { await resetAll(); return; }
-  if (text === '/done' || text === 'done' || text === 'payé') { await markPaid(); return; }
-
-  // Réponses numériques en SLOTS_PROPOSED
-  if (s.conversation === 'SLOTS_PROPOSED') {
-    if (/^(non|no|annuler)/.test(text)) { await resetAll(); return; }
-    const num = parseInt(text, 10);
-    if (Number.isInteger(num) && num >= 1 && num <= (s.proposedSlots || []).length) {
-      const slot = s.proposedSlots[num - 1];
-      await startBooking(slot.time);
-      return;
-    }
-  }
-
-  await sendHelp();
-}
-
-async function forceCheck() {
-  const date = getActiveDate();
-  await wa.send(`🔍 Je vérifie la dispo pour le <b>${fmtDate(date)}</b>...`);
+async function showSlotsForDate(date) {
+  await wa.send(`🔍 Je regarde les créneaux pour le <b>${fmtDate(date)}</b>...`);
   try {
     const { checkAvailability } = require('./monitor');
     const r = await Promise.race([
       checkAvailability(date),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 90s')), 90_000)),
     ]);
-    await sendAvailabilityReport(r, { force: true });
+    if (r.error) {
+      await wa.send(`❌ Erreur : <code>${r.error}</code>`, { buttons: mainMenu() });
+      return;
+    }
+    const all = r.all || r.slots || [];
+    if (!all.length) {
+      await wa.send(
+        `🔴 Aucun créneau dispo le <b>${fmtDate(date)}</b>.`,
+        { buttons: mainMenu() }
+      );
+      return;
+    }
+    const usable = all.filter(s => s.available == null || s.available >= tickets);
+
+    const text =
+      `<b>Créneaux — ${fmtDate(date)}</b>\n\n` +
+      all.map(s => `${slotIndicator(s)} <b>${s.time}</b>`).join('\n') +
+      `\n\n👇 Choisis un horaire :`;
+
+    const rows = [];
+    for (let i = 0; i < usable.length; i += 3) {
+      rows.push(usable.slice(i, i + 3).map(s => ({
+        text: `🕒 ${s.time}`,
+        callback_data: `picktime:${date}:${s.time}`,
+      })));
+    }
+    rows.push([{ text: '⬅️ Retour', callback_data: 'home' }]);
+
+    await wa.send(text, { buttons: rows });
   } catch (e) {
-    log.error({ err: e.message, stack: e.stack }, 'forceCheck crash');
-    await wa.send(`❌ Le check a planté :\n<code>${e.message}</code>`, { buttons: mainMenuButtons() });
+    log.error({ err: e.message }, 'showSlotsForDate crash');
+    await wa.send(`❌ Le check a planté :\n<code>${e.message}</code>`, { buttons: mainMenu() });
   }
 }
 
-async function sendStatus() {
-  const s = state.load();
-  const stateHuman = {
-    IDLE: 'En veille, je surveille.',
-    SLOTS_PROPOSED: 'Créneaux en attente de ton choix.',
-    BOOKING: 'Panier en cours de préparation...',
-    PAYMENT_LINK_SENT: 'Paiement en attente.',
-  }[s.conversation] || s.conversation;
-
-  await wa.send(
-    `<b>📊 Statut</b>\n\n` +
-    `État : ${stateHuman}\n` +
-    `Date cible : ${fmtDate(getActiveDate())}\n` +
-    `Places : ${tickets}\n` +
-    `Vérif auto : ${cronToHuman(checkCron)}`,
-    { buttons: mainMenuButtons() }
-  );
+async function askConfirm(date, time) {
+  const text =
+    `<b>Confirmer la réservation ?</b>\n\n` +
+    `📅 ${fmtDate(date)}\n` +
+    `🕒 ${time}\n` +
+    `🎟 1 place`;
+  const buttons = [
+    [
+      { text: '✅ Oui, acheter', callback_data: `confirm:${date}:${time}` },
+      { text: '❌ Non',         callback_data: 'home' },
+    ],
+  ];
+  await wa.send(text, { buttons });
 }
 
-async function resetAll() {
-  state.reset();
-  if (activeBrowser) { try { await activeBrowser.close(); } catch {} activeBrowser = null; }
-  await wa.send('🔄 Remis à zéro. Je surveille toujours.', { buttons: mainMenuButtons() });
+async function startBooking(date, time) {
+  await wa.send(`⏳ Ouverture du panier pour le <b>${fmtDate(date)}</b> à <b>${time}</b>...`);
+  try {
+    const result = await bookSlot({ targetDate: date, slotTime: time });
+    if (!result.ok) {
+      await wa.send(`❌ Réservation échouée :\n<code>${result.error}</code>`, { buttons: mainMenu() });
+      if (result.screenshot) await wa.sendImage(result.screenshot, 'Dernière vue');
+      return;
+    }
+    if (result.keepAlive && result.keepAlive.browser) activeBrowser = result.keepAlive.browser;
+
+    purchases.add({
+      id: `${date}-${time}-${Date.now()}`,
+      date, time,
+      status: 'pending',
+      paymentUrl: result.paymentUrl,
+    });
+
+    const s = state.load();
+    s.conversation = 'PAYMENT_LINK_SENT';
+    s.paymentUrl = result.paymentUrl;
+    s.paymentSentAt = new Date().toISOString();
+    state.save(s);
+
+    const caption =
+      `✅ <b>Panier prêt</b>\n` +
+      `1 place — ${fmtDate(date)} à ${time}\n\n` +
+      `👉 <a href="${result.paymentUrl}">Ouvrir le paiement</a>\n\n` +
+      `Entre ta CB et valide le 3DS, puis tape <b>/done</b>.`;
+    const buttons = [
+      [{ text: '💳 Payer maintenant', url: result.paymentUrl }],
+      [{ text: '✅ J\'ai payé', callback_data: 'done' }, { text: '🏠 Retour', callback_data: 'home' }],
+    ];
+    if (result.screenshot) await wa.sendImage(result.screenshot, caption, { buttons });
+    else await wa.send(caption, { buttons });
+  } catch (e) {
+    log.error({ err: e.message }, 'booking crash');
+    await wa.send(`❌ Crash : <code>${e.message}</code>`, { buttons: mainMenu() });
+  }
 }
 
 async function markPaid() {
+  const list = purchases.load();
+  const pending = list.find(p => p.status === 'pending');
+  if (pending) {
+    pending.status = 'paid';
+    pending.paidAt = new Date().toISOString();
+    purchases.save(list);
+  }
   if (activeBrowser) { try { await activeBrowser.close(); } catch {} activeBrowser = null; }
   state.reset();
-  await wa.send('🎉 Super, profite de Casa Azul !');
+  await wa.send('🎉 Place confirmée ! Ajoutée à ton stock.', { buttons: mainMenu() });
+}
+
+async function resetAll() {
+  if (activeBrowser) { try { await activeBrowser.close(); } catch {} activeBrowser = null; }
+  state.reset();
+  await wa.send('🔄 Remis à zéro.', { buttons: mainMenu() });
 }
 
 async function sendHelp() {
   await wa.send(
-    `<b>Commandes</b>\n\n` +
-    `🔍 /check — vérifier la dispo\n` +
-    `📊 /status — état actuel\n` +
-    `🔄 /reset — annuler tout\n` +
-    `✅ /done — marquer comme payé\n\n` +
-    `Ou utilise les boutons ci-dessous.`,
-    { buttons: mainMenuButtons() }
+    `<b>Comment ça marche</b>\n\n` +
+    `1️⃣ Choisis une date (boutons en bas)\n` +
+    `2️⃣ Choisis un créneau horaire\n` +
+    `3️⃣ Confirme → je prépare le panier\n` +
+    `4️⃣ Tu paies via le lien → tape /done\n\n` +
+    `Commandes : /start /stock /reset /done`,
+    { buttons: mainMenu() }
   );
 }
+
+async function handleUserMessage(msg) {
+  const raw = (msg.body || '').trim();
+  const text = raw.toLowerCase();
+
+  if (msg._isCallback) {
+    if (raw.startsWith('pickdate:')) { await showSlotsForDate(raw.slice(9)); return; }
+    if (raw.startsWith('picktime:')) {
+      const segs = raw.slice(9).split(':');
+      await askConfirm(segs[0], segs.slice(1).join(':'));
+      return;
+    }
+    if (raw.startsWith('confirm:')) {
+      const segs = raw.slice(8).split(':');
+      await startBooking(segs[0], segs.slice(1).join(':'));
+      return;
+    }
+    if (raw === 'home') { await sendGreeting(); return; }
+    if (raw === 'stock') {
+      await wa.send(`<b>📊 Ton stock</b>\n\n${renderStock()}`, { buttons: mainMenu() });
+      return;
+    }
+    if (raw === 'help') { await sendHelp(); return; }
+    if (raw === 'done') { await markPaid(); return; }
+  }
+
+  if (text === '/start' || text === 'start') { await sendGreeting(); return; }
+  if (text === '/help' || text === 'help') { await sendHelp(); return; }
+  if (text === '/stock') {
+    await wa.send(`<b>📊 Ton stock</b>\n\n${renderStock()}`, { buttons: mainMenu() });
+    return;
+  }
+  if (text === '/reset' || text === '/cancel') { await resetAll(); return; }
+  if (text === '/done' || text === 'done' || text === 'payé') { await markPaid(); return; }
+
+  await sendGreeting();
+}
+
+async function handleSlotsFound() { /* plus de notifs auto: tout est à la demande */ }
 
 function tickPaymentTimeout() {
   const s = state.load();
@@ -336,8 +232,8 @@ function tickPaymentTimeout() {
     log.warn('Paiement expiré, reset');
     if (activeBrowser) { try { activeBrowser.close(); } catch {} activeBrowser = null; }
     state.reset();
-    wa.send('⏰ Délai de paiement dépassé, panier fermé.').catch(() => {});
+    wa.send('⏰ Délai de paiement dépassé.').catch(() => {});
   }
 }
 
-module.exports = { handleSlotsFound, handleUserMessage, tickPaymentTimeout, sendGreeting, forceCheck };
+module.exports = { handleUserMessage, handleSlotsFound, tickPaymentTimeout, sendGreeting, forceCheck: () => sendGreeting() };
