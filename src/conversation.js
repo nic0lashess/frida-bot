@@ -10,6 +10,9 @@ let checkInFlight = false;
 
 const QUICK_DATES = ['2026-05-05', '2026-05-06', '2026-05-07', '2026-05-08'];
 
+let dateAvailabilityCache = {}; // { iso: { available, count, firstTime, checkedAt } }
+let scanInFlight = false;
+
 function fmtDate(iso) {
   const [y, m, d] = iso.split('-');
   const months = ['janv.','févr.','mars','avril','mai','juin','juil.','août','sept.','oct.','nov.','déc.'];
@@ -27,14 +30,52 @@ function slotIndicator(s) {
 }
 
 function dateRow() {
-  return QUICK_DATES.map(d => ({ text: shortDate(d), callback_data: `pickdate:${d}` }));
+  return QUICK_DATES.map(d => {
+    const info = dateAvailabilityCache[d];
+    let prefix = '';
+    if (info) {
+      if (info.available) prefix = `🟢 `;
+      else prefix = `🔴 `;
+    } else {
+      prefix = `⬜ `;
+    }
+    return { text: `${prefix}${shortDate(d)}`, callback_data: `pickdate:${d}` };
+  });
 }
 
 function mainMenu() {
   return [
     dateRow(),
-    [{ text: '📊 Mon stock', callback_data: 'stock' }, { text: '❓ Aide', callback_data: 'help' }],
+    [{ text: '🔄 Scanner dispo', callback_data: 'scan' }, { text: '📊 Mon stock', callback_data: 'stock' }],
+    [{ text: '❓ Aide', callback_data: 'help' }],
   ];
+}
+
+async function scanAvailabilityAll() {
+  if (scanInFlight) {
+    await wa.send('⏳ Scan déjà en cours, patiente.');
+    return;
+  }
+  scanInFlight = true;
+  await wa.send('🔎 Je scanne la dispo des 4 dates (30-60 sec)...');
+  try {
+    const { scanAvailability } = require('./monitor');
+    const res = await scanAvailability(QUICK_DATES);
+    for (const iso of QUICK_DATES) {
+      dateAvailabilityCache[iso] = { ...(res[iso] || {}), checkedAt: new Date().toISOString() };
+    }
+    const lines = QUICK_DATES.map(iso => {
+      const info = dateAvailabilityCache[iso];
+      if (info?.available) return `🟢 <b>${fmtDate(iso)}</b> — ${info.count} créneau(x), dès ${info.firstTime}`;
+      return `🔴 <b>${fmtDate(iso)}</b> — complet`;
+    }).join('\n');
+    await wa.send(`<b>📊 Dispo</b>\n\n${lines}`, { buttons: mainMenu() });
+  } catch (e) {
+    log.error({ err: e.message }, 'scan crash');
+    await wa.send(`❌ Scan échoué : <code>${e.message}</code>`, { buttons: mainMenu() });
+  } finally {
+    scanInFlight = false;
+  }
 }
 
 function renderStock() {
@@ -235,6 +276,7 @@ async function handleUserMessage(msg) {
       await wa.send(`<b>📊 Ton stock</b>\n\n${renderStock()}`, { buttons: mainMenu() });
       return;
     }
+    if (raw === 'scan') { await scanAvailabilityAll(); return; }
     if (raw === 'help') { await sendHelp(); return; }
     if (raw === 'done') { await markPaid(); return; }
   }

@@ -140,39 +140,70 @@ async function pickDate(page, target, diag = {}) {
 }
 
 async function readSlots(page) {
-  // Attente que les créneaux apparaissent. On cherche des éléments contenant un horaire HH:MM.
   await page.waitForFunction(() => {
     return /\d{1,2}:\d{2}/.test(document.body.innerText);
   }, { timeout: 15000 }).catch(() => {});
 
-  // Récupère tous les boutons/éléments cliquables qui ressemblent à un créneau horaire.
+  // Créneaux Fever : <div role="option" data-testid="level-item" class="level-item level-item--time [level-item--disabled]" aria-label="11:00">
   const slots = await page.evaluate(() => {
     const out = [];
-    const els = Array.from(document.querySelectorAll('button, [role="button"], li, div'));
+    const els = Array.from(document.querySelectorAll('[data-testid="level-item"], [role="option"]'));
     const seen = new Set();
     for (const el of els) {
-      const t = (el.innerText || '').trim();
-      const m = t.match(/^(\d{1,2}:\d{2})/);
+      const ariaLabel = el.getAttribute('aria-label') || '';
+      const innerTxt = (el.innerText || '').trim();
+      const m = (ariaLabel.match(/^(\d{1,2}:\d{2})/) || innerTxt.match(/(\d{1,2}:\d{2})/));
       if (!m) continue;
       const time = m[1];
       if (seen.has(time)) continue;
 
-      const disabled = el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true' ||
-        /sold ?out|agotado|no disponible/i.test(t);
+      const cls = el.getAttribute('class') || '';
+      const disabled = cls.includes('disabled') ||
+        el.hasAttribute('disabled') ||
+        el.getAttribute('aria-disabled') === 'true' ||
+        /sold ?out|agotado|no disponible/i.test(innerTxt);
       if (disabled) continue;
 
-      // Détection "Baja disponibilidad" — on extrait si possible un nombre.
-      const lowAvail = /baja disponibilidad|low availability/i.test(t);
-      const numMatch = t.match(/(\d+)\s*(plazas|tickets|disponibles|left|restantes)/i);
+      const lowAvail = cls.includes('low') || /baja disponibilidad|low availability/i.test(innerTxt);
+      const numMatch = innerTxt.match(/(\d+)\s*(plazas|tickets|disponibles|left|restantes)/i);
       const available = numMatch ? parseInt(numMatch[1], 10) : (lowAvail ? 3 : null);
 
       seen.add(time);
-      out.push({ time, available, lowAvailability: lowAvail, raw: t.slice(0, 80) });
+      out.push({ time, available, lowAvailability: lowAvail, raw: innerTxt.slice(0, 80) });
     }
     return out.sort((a, b) => a.time.localeCompare(b.time));
   });
 
   return slots;
+}
+
+// Pré-scan rapide : pour un ensemble de dates, retourne lesquelles ont au moins un créneau dispo
+async function scanAvailability(dates) {
+  const { browser, ctx } = await newContext();
+  const page = await ctx.newPage();
+  const result = {};
+  try {
+    await page.goto(ticketUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const accept = page.getByRole('button', { name: /aceptar|accept|got it|de acuerdo/i }).first();
+    if (await accept.isVisible().catch(() => false)) await accept.click().catch(() => {});
+    await page.waitForTimeout(1500);
+
+    for (const iso of dates) {
+      const target = parseTargetDate(iso);
+      try {
+        const ok = await pickDate(page, target, {});
+        if (!ok) { result[iso] = { available: false, reason: 'date désactivée' }; continue; }
+        const slots = await readSlots(page);
+        const usable = slots.filter(s => s.available == null || s.available >= 1);
+        result[iso] = { available: usable.length > 0, count: usable.length, firstTime: usable[0]?.time };
+      } catch (e) {
+        result[iso] = { available: false, reason: e.message.slice(0, 60) };
+      }
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
+  return result;
 }
 
 async function checkAvailability(dateOverride) {
@@ -220,7 +251,7 @@ async function checkAvailability(dateOverride) {
   }
 }
 
-module.exports = { checkAvailability };
+module.exports = { checkAvailability, scanAvailability };
 
 if (require.main === module) {
   checkAvailability().then(r => {
