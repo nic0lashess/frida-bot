@@ -64,13 +64,19 @@ async function showSlotsForDate(date) {
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 90s')), 90_000)),
     ]);
     if (r.error) {
-      await wa.send(`❌ Erreur : <code>${r.error}</code>\nScreenshot : ${r.screenshot || 'aucun'}`, { buttons: mainMenu() });
+      let detail = `❌ <b>Erreur :</b> <code>${r.error}</code>`;
+      if (r.diag && r.diag.tabTexts) {
+        const txtList = r.diag.tabTexts.map(t => `• <code>${t.text}</code> (${t.tag}${t.role ? ' role=' + t.role : ''})`).join('\n');
+        detail += `\n\n<b>Éléments contenant 2026 sur la page :</b>\n${txtList || '<i>aucun</i>'}`;
+        detail += `\n\n<b>Clic onglet mois réussi ?</b> ${r.diag.monthClicked ? '✅' : '❌'}`;
+      }
+      await wa.send(detail, { buttons: mainMenu() });
+      if (r.initialScreenshot) {
+        try { await wa.sendImage(r.initialScreenshot, 'État initial du site'); } catch {}
+      }
       if (r.screenshot) {
-        try {
-          await wa.sendImage(r.screenshot, 'État du site au moment de l\'erreur');
-        } catch (e) {
-          await wa.send(`⚠️ Impossible d'envoyer le screenshot : <code>${e.message}</code>`);
-        }
+        try { await wa.sendImage(r.screenshot, 'État au moment de l\'échec'); }
+        catch (e) { await wa.send(`⚠️ Envoi screenshot raté : <code>${e.message}</code>`); }
       }
       return;
     }

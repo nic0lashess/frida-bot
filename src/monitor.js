@@ -17,36 +17,64 @@ function parseTargetDate(iso) {
   return { year: y, month: m, day: d, monthName: MONTHS_ES[m - 1], monthShort: MONTHS_ES_SHORT[m - 1] };
 }
 
-async function pickDate(page, target) {
-  // Attendre que le calendrier Fever soit chargé (présence du titre + onglets)
+async function pickDate(page, target, diag = {}) {
   await page.waitForSelector('text=/selecciona tipo de boleto|select/i', { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(800);
 
-  // 1. Cliquer l'onglet du mois cible (ex: "MAY 2026" — insensible à la casse)
   const monthTabRegex = new RegExp(`${target.monthShort}\\s*${target.year}`, 'i');
 
-  // Diagnostic : lister tous les boutons contenant "2026" pour voir ce que le site expose
-  const candidateTabs = await page.locator('button, [role="button"], [role="tab"]').all();
-  const tabTexts = [];
-  for (const t of candidateTabs) {
-    const txt = (await t.innerText().catch(() => '')).trim();
-    if (/20\d\d/.test(txt) && txt.length < 40) tabTexts.push(txt);
+  // Diagnostic : scanner TOUS les éléments (pas juste les buttons) contenant "2026"
+  const detected = await page.evaluate((yearStr) => {
+    const out = [];
+    const all = document.querySelectorAll('*');
+    const seen = new Set();
+    for (const el of all) {
+      if (el.children.length > 0) continue; // feuilles uniquement
+      const t = (el.innerText || el.textContent || '').trim();
+      if (!t || !t.includes(yearStr) || t.length > 40) continue;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      out.push({
+        text: t,
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute('role') || null,
+        cls: (el.getAttribute('class') || '').slice(0, 60),
+      });
+    }
+    return out;
+  }, String(target.year));
+  diag.tabTexts = detected;
+  log.info({ detected }, 'Éléments avec année détectés');
+
+  // Multi-stratégie de clic sur l'onglet mois
+  const tryClicks = [
+    () => page.getByRole('button', { name: monthTabRegex }).first(),
+    () => page.getByRole('tab', { name: monthTabRegex }).first(),
+    () => page.locator(`button:has-text("${target.monthShort}")`).first(),
+    () => page.locator(`[role="button"]:has-text("${target.monthShort}")`).first(),
+    () => page.locator(`*:has-text("${target.monthShort} ${target.year}")`).last(),
+    // XPath fallback : n'importe quel élément contenant le texte exact
+    () => page.locator(`xpath=//*[normalize-space(text())="${target.monthShort} ${target.year}"]`).first(),
+  ];
+
+  let clicked = false;
+  for (const getLoc of tryClicks) {
+    try {
+      const loc = getLoc();
+      if (await loc.count() === 0) continue;
+      if (!(await loc.isVisible().catch(() => false))) continue;
+      await loc.click({ force: true, timeout: 3000 });
+      clicked = true;
+      log.info('Onglet mois cliqué via stratégie', { idx: tryClicks.indexOf(getLoc) });
+      break;
+    } catch {}
   }
-  log.info({ tabTexts }, 'Onglets mois détectés');
+  diag.monthClicked = clicked;
 
-  const monthTab = page.getByRole('button', { name: monthTabRegex })
-    .or(page.getByRole('tab', { name: monthTabRegex }))
-    .or(page.locator(`button:has-text("${target.monthShort}")`))
-    .first();
-
-  if (!(await monthTab.isVisible().catch(() => false))) {
-    log.warn({ monthRegex: monthTabRegex.toString(), tabTexts }, 'Onglet mois introuvable');
+  if (!clicked) {
+    log.warn({ monthShort: target.monthShort, detected }, 'Onglet mois : aucune stratégie n\'a marché');
     return false;
   }
-  log.info({ monthShort: target.monthShort }, 'Clic onglet mois');
-  await monthTab.click({ force: true }).catch(async () => {
-    await monthTab.evaluate(el => el.click()).catch(() => {});
-  });
   await page.waitForTimeout(1200);
 
   // 2. Cliquer le jour dans la grille. Les cellules sont des éléments avec juste le numéro.
@@ -138,11 +166,18 @@ async function checkAvailability(dateOverride) {
     const initialShot = await screenshot(page, 'calendar-initial').catch(() => null);
     log.info({ initialShot }, 'État initial du calendrier');
 
-    const ok = await pickDate(page, target);
+    const diag = {};
+    const ok = await pickDate(page, target, diag);
     if (!ok) {
       const shot = await screenshot(page, 'pickdate-failed');
-      log.warn({ shot }, 'Impossible de cliquer la date cible');
-      return { error: `date_not_found (${target.monthName} ${target.day})`, screenshot: shot, slots: [] };
+      log.warn({ shot, diag }, 'Impossible de cliquer la date cible');
+      return {
+        error: `date_not_found (${target.monthName} ${target.day})`,
+        screenshot: shot,
+        initialScreenshot: initialShot,
+        diag,
+        slots: [],
+      };
     }
 
     const slots = await readSlots(page);
