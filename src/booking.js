@@ -63,21 +63,14 @@ async function bookSlot({ targetDate, slotTime }) {
       await page.waitForTimeout(200);
     }
 
-    // 5. Bouton principal "SUMAR al carrito" / "Continuar"
-    // Attente que le bouton final apparaisse après l'ajout du ticket
+    // 5. Bouton principal "Comprar ahora" — Fever l'identifie par data-testid="purchase-button"
     await page.waitForTimeout(1500);
 
-    // Essai prioritaire : chercher le bouton qui contient explicitement SUMAR ou AL CARRITO
-    // Sinon : prendre le DERNIER bouton primary--fill (généralement en bas de la colonne de droite)
-    const textMatches = page.locator('button').filter({
-      hasText: /sumar|al carrito|añadir|a[ñn]adir|comprar|continuar|siguiente|pagar/i,
-    });
-    const primaryButtons = page.locator('button.button--primary.button--fill, button.button--primary, button[type="submit"]');
-
     const tryOrder = [
-      textMatches.last(),
-      textMatches.first(),
-      primaryButtons.last(),
+      page.locator('[data-testid="purchase-button"]'),
+      page.locator('.purchase-button button, .fixed-cta button'),
+      page.locator('button').filter({ hasText: /comprar ahora|sumar|al carrito|añadir|a[ñn]adir|continuar|siguiente|pagar/i }).last(),
+      page.locator('button.button--primary.button--fill').last(),
     ];
 
     let clicked = false;
