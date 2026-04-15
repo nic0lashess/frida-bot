@@ -72,13 +72,11 @@ async function showSlotsForDate(date) {
         if (r.diag.foundInFrame) detail += ` (calendrier dans iframe ${r.diag.foundInFrame.slice(0, 60)})`;
         const txtList = (r.diag.tabTexts || []).map(t => `• <code>${t.text}</code> (${t.tag}${t.role ? ' role=' + t.role : ''})`).join('\n');
         detail += `\n\n<b>Éléments contenant 2026 :</b>\n${txtList || '<i>aucun</i>'}`;
-        detail += `\n\n<b>Clic onglet mois réussi ?</b> ${r.diag.monthClicked ? '✅' : '❌'}`;
-        if (r.diag.dayCandidates) {
-          const dayList = r.diag.dayCandidates.map(d =>
-            `• ${d.tag} parent=${d.parentTag} cls=<code>${d.selfCls || d.parentCls}</code>`
-          ).join('\n');
-          detail += `\n\n<b>Candidats pour "${r.diag.dayStr || '?'}" :</b>\n${dayList || '<i>aucun</i>'}`;
-        }
+        detail += `\n\n<b>Clic onglet mois :</b> ${r.diag.monthClicked ? '✅' : '❌'}`;
+        if (r.diag.cellMissing) detail += `\n<b>Cellule jour :</b> ❌ absente du DOM`;
+        if (r.diag.cellClass) detail += `\n<b>Cellule jour class :</b> <code>${r.diag.cellClass}</code>`;
+        if (r.diag.cellDisabled) detail += `\n<b>Jour désactivé :</b> ⚠️ (complet ou fermé)`;
+        if (r.diag.dayClicked) detail += `\n<b>Clic jour :</b> ✅`;
       }
       await wa.send(detail, { buttons: mainMenu() });
       if (r.initialScreenshot) {

@@ -106,66 +106,37 @@ async function pickDate(page, target, diag = {}) {
   }
   await page.waitForTimeout(1200);
 
-  // 2. Cliquer le jour dans la grille
-  const dayStr = String(target.day);
+  // 2. Cliquer le jour dans la grille ngb-datepicker
+  // Format cellule : <div role="gridcell" class="ngb-dp-day" aria-label="5-5-2026"><span>5</span></div>
+  const ariaLabel = `${target.day}-${target.month}-${target.year}`;
+  const cell = page.locator(`[role="gridcell"][aria-label="${ariaLabel}"]`).first();
 
-  // Scan diagnostic : tous les éléments feuilles avec exactement "5" (ou autre) comme texte
-  const dayCandidates = await page.evaluate((d) => {
-    const out = [];
-    const all = document.querySelectorAll('*');
-    for (const el of all) {
-      if (el.children.length > 0) continue;
-      const t = (el.innerText || el.textContent || '').trim();
-      if (t !== d) continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      const parentCls = (el.parentElement?.getAttribute('class') || '').slice(0, 60);
-      const selfCls = (el.getAttribute('class') || '').slice(0, 60);
-      // Générer un sélecteur pour cet élément via un identifiant unique temporaire
-      const tempId = 'daycell-' + Math.random().toString(36).slice(2, 10);
-      el.setAttribute('data-bot-pick', tempId);
-      out.push({
-        tag: el.tagName.toLowerCase(),
-        parentTag: el.parentElement?.tagName?.toLowerCase() || null,
-        parentCls,
-        selfCls,
-        role: el.getAttribute('role') || null,
-        ariaDisabled: el.getAttribute('aria-disabled'),
-        tempId,
-        x: Math.round(rect.x), y: Math.round(rect.y),
-      });
-    }
-    return out;
-  }, dayStr);
-  diag.dayCandidates = dayCandidates;
-  log.info({ dayStr, count: dayCandidates.length, dayCandidates }, 'Candidats jour détectés');
-
-  // Essayer chaque candidat : prendre le premier qui est dans la zone calendrier (x > 300 grossièrement) et cliquable
-  for (const c of dayCandidates) {
-    // On essaie d'abord le parent (souvent la vraie cellule cliquable), puis l'élément lui-même
-    for (const targetId of [c.tempId]) {
-      const loc = page.locator(`[data-bot-pick="${targetId}"]`).first();
-      // Essayer de cliquer sur le parent (souvent la carte cliquable)
-      const parentLoc = loc.locator('xpath=..').first();
-      for (const trial of [parentLoc, loc]) {
-        try {
-          const ariaDisabled = await trial.getAttribute('aria-disabled').catch(() => null);
-          if (ariaDisabled === 'true') continue;
-          await trial.scrollIntoViewIfNeeded().catch(() => {});
-          await trial.click({ force: true, timeout: 3000 });
-          log.info({ dayStr, tempId: targetId, via: trial === parentLoc ? 'parent' : 'self' }, 'Clic jour réussi');
-          diag.dayClickedVia = trial === parentLoc ? 'parent' : 'self';
-          await page.waitForTimeout(600);
-          return true;
-        } catch (e) {
-          log.warn({ err: e.message, tempId: targetId }, 'Tentative clic jour échouée');
-        }
-      }
-    }
+  // Attendre que la cellule soit dans le DOM après changement de mois
+  try {
+    await cell.waitFor({ state: 'attached', timeout: 8000 });
+  } catch {
+    diag.cellMissing = true;
+    log.warn({ ariaLabel }, 'Cellule ngb-dp-day absente du DOM après clic mois');
+    return false;
   }
 
-  log.warn({ dayStr }, 'Aucune cellule jour cliquable trouvée');
-  return false;
+  const cls = (await cell.getAttribute('class').catch(() => '')) || '';
+  const ariaDisabled = await cell.getAttribute('aria-disabled').catch(() => null);
+  diag.cellClass = cls;
+  diag.cellAriaDisabled = ariaDisabled;
+
+  if (cls.includes('disabled') || ariaDisabled === 'true') {
+    log.warn({ ariaLabel, cls }, 'Jour cible désactivé (complet ou fermé)');
+    diag.cellDisabled = true;
+    return false;
+  }
+
+  await cell.scrollIntoViewIfNeeded().catch(() => {});
+  await cell.click({ force: true });
+  await page.waitForTimeout(600);
+  diag.dayClicked = true;
+  log.info({ ariaLabel }, 'Clic jour cible réussi');
+  return true;
 }
 
 async function readSlots(page) {
