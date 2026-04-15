@@ -51,24 +51,44 @@ async function bookSlot({ targetDate, slotTime }) {
     }
     await slotBtn.click();
 
-    // 4. Quantité de billets — on cherche le bloc du bon type tarifaire et on incrémente
-    const typeRegex = TICKET_TYPE_LABELS[ticketType] || /general/i;
+    // 4. Quantité de billets — bouton "+" Fever = [data-testid="session-selection-increment-button"]
     await page.waitForTimeout(800);
-
-    // Stratégie : trouver le label, remonter au conteneur, cliquer le bouton "+"
-    const typeLabel = page.getByText(typeRegex).first();
-    await typeLabel.waitFor({ timeout: 10000 });
-    const container = typeLabel.locator('xpath=ancestor::*[self::div or self::li or self::section][1]');
-    const plusBtn = container.locator('button:has-text("+"), button[aria-label*="add" i], button[aria-label*="aumentar" i], button[aria-label*="increase" i]').first();
+    const plusBtn = page.locator(
+      '[data-testid="session-selection-increment-button"]:not([disabled]), button[aria-label*="Más boletos" i]:not([disabled]), button[aria-label*="add" i]:not([disabled])'
+    ).first();
+    await plusBtn.waitFor({ state: 'visible', timeout: 10000 });
 
     for (let i = 0; i < tickets; i++) {
       await plusBtn.click();
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(200);
     }
 
-    // 5. Bouton "Continuer" / "Comprar"
-    const continueBtn = page.getByRole('button', { name: /continuar|comprar|siguiente|continue|checkout|pagar/i }).first();
-    await continueBtn.click();
+    // 5. Bouton principal "SUMAR al carrito" / "Continuar" / "Comprar"
+    await page.waitForTimeout(800);
+    const submitCandidates = [
+      page.getByRole('button', { name: /sumar|añadir|a[ñn]adir al carrito|continuar|comprar|siguiente|continue|checkout|pagar/i }),
+      page.locator('button.button--primary.button--fill'),
+      page.locator('button[type="submit"]'),
+      page.locator('button:has-text("SUMAR")'),
+      page.locator('button:has-text("Continuar")'),
+    ];
+    let clicked = false;
+    for (const c of submitCandidates) {
+      const el = c.first();
+      if (await el.count() === 0) continue;
+      if (!(await el.isVisible().catch(() => false))) continue;
+      const disabled = await el.getAttribute('disabled').catch(() => null);
+      if (disabled != null) continue;
+      log.info({ strategy: submitCandidates.indexOf(c) }, 'Clic bouton submit');
+      await el.scrollIntoViewIfNeeded().catch(() => {});
+      await el.click({ force: true });
+      clicked = true;
+      break;
+    }
+    if (!clicked) {
+      const shot = await screenshot(page, 'no-submit-button');
+      throw new Error(`Bouton "SUMAR/Continuar" introuvable. Screenshot: ${shot}`);
+    }
 
     // 6. Formulaire acheteur (best effort — selon Fever)
     await page.waitForLoadState('domcontentloaded');
