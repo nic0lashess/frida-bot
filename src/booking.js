@@ -9,7 +9,7 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
-const { ticketUrl, tickets, ticketType, buyer } = require('./config');
+const { ticketUrl, tickets, ticketType, buyer, headed } = require('./config');
 const { screenshot } = require('./browser');
 const log = require('./logger');
 
@@ -21,8 +21,8 @@ const TICKET_TYPE_LABELS = {
 };
 
 async function bookSlot({ targetDate, slotTime }) {
-  // Toujours headed pour le booking : on laisse l'utilisateur finir.
-  const browser = await chromium.launch({ headless: false, args: ['--disable-blink-features=AutomationControlled'] });
+  // Headed si dispo (PC local) sinon headless (Railway/conteneur).
+  const browser = await chromium.launch({ headless: !headed, args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox'] });
   const ctx = await browser.newContext({
     locale: 'es-MX',
     timezoneId: 'America/Mexico_City',
@@ -94,13 +94,14 @@ async function bookSlot({ targetDate, slotTime }) {
     const finalShot = await screenshot(page, 'ready-to-pay');
     log.info({ finalShot }, 'Panier prêt — fenêtre laissée OUVERTE pour paiement manuel');
 
-    return {
-      ok: true,
-      paymentUrl: page.url(),
-      screenshot: finalShot,
-      // On NE FERME PAS le navigateur — l'utilisateur paye dedans
-      keepAlive: { browser, ctx, page },
-    };
+    const finalUrl = page.url();
+    // Sur Railway (headless): on ferme le navigateur, l'utilisateur paiera via le lien.
+    // Sur PC local (headed): on laisse ouvert comme avant.
+    if (headed) {
+      return { ok: true, paymentUrl: finalUrl, screenshot: finalShot, keepAlive: { browser, ctx, page } };
+    }
+    await browser.close().catch(() => {});
+    return { ok: true, paymentUrl: finalUrl, screenshot: finalShot };
   } catch (err) {
     const shot = await screenshot(page, 'booking-error').catch(() => null);
     log.error({ err: err.message, shot }, 'Erreur booking');
