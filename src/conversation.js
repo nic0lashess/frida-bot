@@ -64,9 +64,13 @@ async function showSlotsForDate(date) {
       new Promise((_, rej) => setTimeout(() => rej(new Error('timeout 90s')), 90_000)),
     ]);
     if (r.error) {
-      await wa.send(`❌ Erreur : <code>${r.error}</code>`, { buttons: mainMenu() });
+      await wa.send(`❌ Erreur : <code>${r.error}</code>\nScreenshot : ${r.screenshot || 'aucun'}`, { buttons: mainMenu() });
       if (r.screenshot) {
-        try { await wa.sendImage(r.screenshot, 'État du site au moment de l\'erreur'); } catch {}
+        try {
+          await wa.sendImage(r.screenshot, 'État du site au moment de l\'erreur');
+        } catch (e) {
+          await wa.send(`⚠️ Impossible d'envoyer le screenshot : <code>${e.message}</code>`);
+        }
       }
       return;
     }
