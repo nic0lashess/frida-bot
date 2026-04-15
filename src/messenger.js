@@ -13,12 +13,12 @@ async function start() {
   }
 }
 
-async function send(text) {
-  await Promise.allSettled(transports.map(t => t.send(text)));
+async function send(text, options) {
+  await Promise.allSettled(transports.map(t => t.send(text, options)));
 }
 
-async function sendImage(filePath, caption) {
-  await Promise.allSettled(transports.map(t => t.sendImage(filePath, caption)));
+async function sendImage(filePath, caption, options) {
+  await Promise.allSettled(transports.map(t => t.sendImage(filePath, caption, options)));
 }
 
 function onMessage(handler) {

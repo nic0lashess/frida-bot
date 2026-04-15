@@ -3,7 +3,7 @@ const log = require('./logger');
 const { checkCron, targetDate, tickets } = require('./config');
 const wa = require('./messenger');
 const { checkAvailability } = require('./monitor');
-const { handleSlotsFound, handleUserMessage, tickPaymentTimeout } = require('./conversation');
+const { handleSlotsFound, handleUserMessage, tickPaymentTimeout, sendGreeting, forceCheck } = require('./conversation');
 
 async function runCheck() {
   log.info('--- Tick monitor ---');
@@ -23,15 +23,10 @@ async function main() {
   await wa.start();
   wa.onMessage(handleUserMessage);
 
-  await wa.send(
-    `🤖 Frida-bot en ligne.\n` +
-    `Cible: ${tickets} places le ${targetDate}.\n` +
-    `Polling: ${checkCron}.\n` +
-    `Tape /check pour forcer un check.`
-  );
+  await sendGreeting();
 
-  // Premier check immédiat
-  runCheck();
+  // Premier check immédiat avec rendu enrichi
+  forceCheck().catch(e => log.error({ err: e.message }, 'initial check failed'));
 
   // Cron récurrent
   cron.schedule(checkCron, runCheck);

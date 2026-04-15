@@ -36,12 +36,12 @@ client.on('message', async msg => {
   }
 });
 
-async function send(text) {
+async function send(text, _options) {
   await readyPromise;
   return client.sendMessage(ownerJid, text);
 }
 
-async function sendImage(filePath, caption) {
+async function sendImage(filePath, caption, _options) {
   await readyPromise;
   const { MessageMedia } = require('whatsapp-web.js');
   const media = MessageMedia.fromFilePath(filePath);
