@@ -22,16 +22,32 @@ async function pickDate(page, target) {
   await page.waitForSelector('text=/selecciona tipo de boleto|select/i', { timeout: 20000 }).catch(() => {});
   await page.waitForTimeout(800);
 
-  // 1. Cliquer l'onglet du mois cible (ex: "MAY 2026")
-  const monthTabText = `${target.monthShort} ${target.year}`;
-  const monthTab = page.locator(`button:has-text("${monthTabText}"), [role="button"]:has-text("${monthTabText}"), [role="tab"]:has-text("${monthTabText}")`).first();
+  // 1. Cliquer l'onglet du mois cible (ex: "MAY 2026" — insensible à la casse)
+  const monthTabRegex = new RegExp(`${target.monthShort}\\s*${target.year}`, 'i');
+
+  // Diagnostic : lister tous les boutons contenant "2026" pour voir ce que le site expose
+  const candidateTabs = await page.locator('button, [role="button"], [role="tab"]').all();
+  const tabTexts = [];
+  for (const t of candidateTabs) {
+    const txt = (await t.innerText().catch(() => '')).trim();
+    if (/20\d\d/.test(txt) && txt.length < 40) tabTexts.push(txt);
+  }
+  log.info({ tabTexts }, 'Onglets mois détectés');
+
+  const monthTab = page.getByRole('button', { name: monthTabRegex })
+    .or(page.getByRole('tab', { name: monthTabRegex }))
+    .or(page.locator(`button:has-text("${target.monthShort}")`))
+    .first();
+
   if (!(await monthTab.isVisible().catch(() => false))) {
-    log.warn({ monthTabText }, 'Onglet mois introuvable');
+    log.warn({ monthRegex: monthTabRegex.toString(), tabTexts }, 'Onglet mois introuvable');
     return false;
   }
-  log.info({ monthTabText }, 'Clic onglet mois');
-  await monthTab.click();
-  await page.waitForTimeout(800);
+  log.info({ monthShort: target.monthShort }, 'Clic onglet mois');
+  await monthTab.click({ force: true }).catch(async () => {
+    await monthTab.evaluate(el => el.click()).catch(() => {});
+  });
+  await page.waitForTimeout(1200);
 
   // 2. Cliquer le jour dans la grille. Les cellules sont des éléments avec juste le numéro.
   // Stratégies multiples pour trouver le bon "5" sans matcher "15", "25"...
