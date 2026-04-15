@@ -17,23 +17,37 @@ function parseTargetDate(iso) {
 }
 
 async function pickDate(page, target) {
-  // Attendre le calendrier
   await page.waitForSelector('[role="grid"], [class*="calendar" i], [class*="datepicker" i]', { timeout: 15000 });
 
-  // Le calendrier ngb-datepicker utilise aria-label="D-M-YYYY" (ex: "4-5-2026").
   const exactLabel = `${target.day}-${target.month}-${target.year}`;
-  const enabledSelector = `[aria-label="${exactLabel}"]:not(.disabled):not([aria-disabled="true"])`;
   const anySelector = `[aria-label="${exactLabel}"]`;
 
+  // 1. Essayer de cliquer directement un onglet/bouton du mois cible (ex: "Mayo", "May")
+  const monthTabCandidates = [
+    page.getByRole('tab', { name: new RegExp(`^${target.monthName}$`, 'i') }),
+    page.getByRole('button', { name: new RegExp(`^${target.monthName}$`, 'i') }),
+    page.locator(`button:has-text("${target.monthName}"):not([disabled])`),
+    page.locator(`[role="tab"]:has-text("${target.monthName}")`),
+  ];
+  for (const c of monthTabCandidates) {
+    const el = c.first();
+    if (await el.count() > 0 && await el.isVisible().catch(() => false)) {
+      log.info({ monthName: target.monthName }, 'Clic onglet mois');
+      await el.click().catch(() => {});
+      await page.waitForTimeout(500);
+      break;
+    }
+  }
+
+  // 2. Chercher la cellule exacte, sinon naviguer avec flèche "mois suivant"
   async function findNextBtn() {
     const candidates = [
-      'button.ngb-dp-arrow-btn:not([disabled]):nth-of-type(2)',
-      'button.ngb-dp-arrow-btn:not([disabled]):last-of-type',
+      'button.ngb-dp-arrow-btn:nth-of-type(2):not([disabled])',
+      'button.ngb-dp-arrow-btn:last-of-type:not([disabled])',
       '[aria-label*="Next" i]:not([disabled])',
       '[aria-label*="siguiente" i]:not([disabled])',
       '[aria-label*="suivant" i]:not([disabled])',
       '.ngb-dp-arrow.right button',
-      'button:has(.ngb-dp-navigation-chevron):nth-of-type(2)',
     ];
     for (const sel of candidates) {
       const loc = page.locator(sel).first();
@@ -47,20 +61,24 @@ async function pickDate(page, target) {
     if (await cell.count() > 0) {
       const disabled = await cell.getAttribute('aria-disabled').catch(() => null);
       const cls = (await cell.getAttribute('class').catch(() => '')) || '';
-      if (disabled !== 'true' && !cls.includes('disabled')) {
+      const hidden = cls.includes('hidden') || cls.includes('outside') || cls.includes('disabled');
+      if (disabled !== 'true' && !hidden) {
+        log.info({ exactLabel, cls }, 'Clic date cible');
         await cell.scrollIntoViewIfNeeded().catch(() => {});
         await cell.click();
         return true;
       }
-      log.warn({ exactLabel, disabled, cls }, 'Date présente mais désactivée, tentative nav mois suivant');
+      log.warn({ exactLabel, disabled, cls, iter: i }, 'Date trouvée mais non cliquable, nav suivant');
+    } else {
+      log.info({ iter: i }, 'Date cible absente du DOM, nav suivant');
     }
     const next = await findNextBtn();
     if (!next) {
-      log.warn({ i }, 'Bouton "mois suivant" introuvable');
+      log.warn({ i }, 'Bouton "mois suivant" introuvable, abandon');
       break;
     }
     await next.click();
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(600);
   }
   return false;
 }
@@ -115,11 +133,15 @@ async function checkAvailability(dateOverride) {
       if (await btn.isVisible().catch(() => false)) await btn.click().catch(() => {});
     }
 
+    // Screenshot de l'état initial avant navigation
+    const initialShot = await screenshot(page, 'calendar-initial').catch(() => null);
+    log.info({ initialShot }, 'État initial du calendrier');
+
     const ok = await pickDate(page, target);
     if (!ok) {
       const shot = await screenshot(page, 'pickdate-failed');
       log.warn({ shot }, 'Impossible de cliquer la date cible');
-      return { error: 'date_not_found', screenshot: shot, slots: [] };
+      return { error: `date_not_found (${target.monthName} ${target.day})`, screenshot: shot, slots: [] };
     }
 
     const slots = await readSlots(page);
