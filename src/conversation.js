@@ -6,6 +6,7 @@ const { bookSlot } = require('./booking');
 const { targetDate, tickets, slotProposalTimeoutMin, paymentLinkTimeoutMin } = require('./config');
 
 let activeBrowser = null;
+let checkInFlight = false;
 
 const QUICK_DATES = ['2026-05-05', '2026-05-06', '2026-05-07', '2026-05-08'];
 
@@ -56,6 +57,11 @@ async function sendGreeting() {
 }
 
 async function showSlotsForDate(date) {
+  if (checkInFlight) {
+    await wa.send('⏳ Un check est déjà en cours, patiente.');
+    return;
+  }
+  checkInFlight = true;
   await wa.send(`🔍 Je regarde les créneaux pour le <b>${fmtDate(date)}</b>...`);
   try {
     const { checkAvailability } = require('./monitor');
@@ -116,6 +122,8 @@ async function showSlotsForDate(date) {
   } catch (e) {
     log.error({ err: e.message }, 'showSlotsForDate crash');
     await wa.send(`❌ Le check a planté :\n<code>${e.message}</code>`, { buttons: mainMenu() });
+  } finally {
+    checkInFlight = false;
   }
 }
 
