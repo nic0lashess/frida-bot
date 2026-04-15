@@ -1,33 +1,42 @@
 // Helper partagé monitor/booking pour cliquer une date dans le calendrier Fever.
-const MONTHS_ES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const MONTHS_ES_SHORT = ['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC'];
 
 async function pickDateOnPage(page, isoDate) {
   const [y, m, d] = isoDate.split('-').map(Number);
-  const monthName = MONTHS_ES[m - 1];
+  const monthShort = MONTHS_ES_SHORT[m - 1];
 
-  await page.waitForSelector('[role="grid"], [class*="calendar" i], [class*="datepicker" i]', { timeout: 15000 });
+  // Attendre le calendrier Fever (chips + ngb-datepicker)
+  await page.waitForSelector('text=/ABR\\s*\\d{4}|MAY\\s*\\d{4}|ENE\\s*\\d{4}/i', { timeout: 25000 }).catch(() => {});
+  await page.waitForTimeout(1500);
 
-  for (let i = 0; i < 24; i++) {
-    const monthVisible = await page.getByText(new RegExp(monthName, 'i')).first().isVisible().catch(() => false);
-    if (monthVisible) break;
-    const next = page.getByRole('button', { name: /next|siguiente|mes siguiente|>/i }).first();
-    if (!(await next.isVisible().catch(() => false))) break;
-    await next.click();
-    await page.waitForTimeout(300);
+  // 1. Cliquer le chip du mois cible (ex: "may 2026")
+  const monthRegex = new RegExp(`${monthShort}\\s*${y}`, 'i');
+  const monthChip = page.getByRole('button', { name: monthRegex })
+    .or(page.getByRole('tab', { name: monthRegex }))
+    .or(page.locator(`.list-chip__item:has-text("${monthShort}")`))
+    .or(page.locator(`xpath=//*[contains(translate(text(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), "${monthShort} ${y}")]`))
+    .first();
+  if (await monthChip.count() > 0 && await monthChip.isVisible().catch(() => false)) {
+    await monthChip.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(1200);
   }
 
-  const dayStr = String(d);
-  const candidates = [
-    page.getByRole('button', { name: new RegExp(`\\b${dayStr}\\b.*${monthName}`, 'i') }),
-    page.getByRole('gridcell', { name: new RegExp(`\\b${dayStr}\\b`, 'i') }),
-    page.locator(`[aria-label*="${dayStr} de ${monthName}" i]`),
-    page.locator(`button:has-text("${dayStr}"):not([disabled])`),
-  ];
-  for (const c of candidates) {
-    const el = c.first();
-    if (await el.isVisible().catch(() => false)) { await el.click(); return true; }
+  // 2. Cliquer la cellule jour via aria-label="D-M-YYYY"
+  const ariaLabel = `${d}-${m}-${y}`;
+  const cell = page.locator(`[role="gridcell"][aria-label="${ariaLabel}"]`).first();
+  try {
+    await cell.waitFor({ state: 'attached', timeout: 8000 });
+  } catch {
+    return false;
   }
-  return false;
+  const cls = (await cell.getAttribute('class').catch(() => '')) || '';
+  const ariaDisabled = await cell.getAttribute('aria-disabled').catch(() => null);
+  if (cls.includes('disabled') || ariaDisabled === 'true') return false;
+
+  await cell.scrollIntoViewIfNeeded().catch(() => {});
+  await cell.click({ force: true });
+  await page.waitForTimeout(600);
+  return true;
 }
 
 module.exports = { pickDateOnPage };
