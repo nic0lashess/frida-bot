@@ -2,20 +2,7 @@ const cron = require('node-cron');
 const log = require('./logger');
 const { checkCron, targetDate, tickets } = require('./config');
 const wa = require('./messenger');
-const { checkAvailability } = require('./monitor');
-const { handleSlotsFound, handleUserMessage, tickPaymentTimeout, sendGreeting, forceCheck } = require('./conversation');
-
-async function runCheck() {
-  log.info('--- Tick monitor ---');
-  try {
-    const r = await checkAvailability();
-    if (r.error) { log.warn({ err: r.error }, 'check error'); return; }
-    if (r.slots.length === 0) { log.info('Aucun créneau usable'); return; }
-    await handleSlotsFound(r.slots);
-  } catch (e) {
-    log.error({ err: e.message }, 'runCheck failure');
-  }
-}
+const { handleUserMessage, tickPaymentTimeout, sendGreeting } = require('./conversation');
 
 async function main() {
   log.info({ targetDate, tickets, checkCron }, 'frida-bot démarrage');
@@ -25,13 +12,17 @@ async function main() {
 
   await sendGreeting();
 
-  // Premier check immédiat avec rendu enrichi
-  forceCheck().catch(e => log.error({ err: e.message }, 'initial check failed'));
+  // Cron optionnel : uniquement si CHECK_CRON est défini et non "off"
+  if (checkCron && checkCron !== 'off' && cron.validate(checkCron)) {
+    log.info({ checkCron }, 'Cron auto-check activé');
+    cron.schedule(checkCron, async () => {
+      log.info('--- Tick cron ---');
+      // Auto-check désactivé par défaut — uniquement notifs passives
+    });
+  } else {
+    log.info('Aucun cron auto (mode à la demande uniquement)');
+  }
 
-  // Cron récurrent
-  cron.schedule(checkCron, runCheck);
-
-  // Watchdog timeout paiement (toutes les minutes)
   setInterval(tickPaymentTimeout, 60_000);
 
   log.info('Bot prêt.');
