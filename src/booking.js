@@ -63,31 +63,53 @@ async function bookSlot({ targetDate, slotTime }) {
       await page.waitForTimeout(200);
     }
 
-    // 5. Bouton principal "SUMAR al carrito" / "Continuar" / "Comprar"
-    await page.waitForTimeout(800);
-    const submitCandidates = [
-      page.getByRole('button', { name: /sumar|añadir|a[ñn]adir al carrito|continuar|comprar|siguiente|continue|checkout|pagar/i }),
-      page.locator('button.button--primary.button--fill'),
-      page.locator('button[type="submit"]'),
-      page.locator('button:has-text("SUMAR")'),
-      page.locator('button:has-text("Continuar")'),
+    // 5. Bouton principal "SUMAR al carrito" / "Continuar"
+    // Attente que le bouton final apparaisse après l'ajout du ticket
+    await page.waitForTimeout(1500);
+
+    // Essai prioritaire : chercher le bouton qui contient explicitement SUMAR ou AL CARRITO
+    // Sinon : prendre le DERNIER bouton primary--fill (généralement en bas de la colonne de droite)
+    const textMatches = page.locator('button').filter({
+      hasText: /sumar|al carrito|añadir|a[ñn]adir|comprar|continuar|siguiente|pagar/i,
+    });
+    const primaryButtons = page.locator('button.button--primary.button--fill, button.button--primary, button[type="submit"]');
+
+    const tryOrder = [
+      textMatches.last(),
+      textMatches.first(),
+      primaryButtons.last(),
     ];
+
     let clicked = false;
-    for (const c of submitCandidates) {
-      const el = c.first();
-      if (await el.count() === 0) continue;
-      if (!(await el.isVisible().catch(() => false))) continue;
-      const disabled = await el.getAttribute('disabled').catch(() => null);
-      if (disabled != null) continue;
-      log.info({ strategy: submitCandidates.indexOf(c) }, 'Clic bouton submit');
-      await el.scrollIntoViewIfNeeded().catch(() => {});
-      await el.click({ force: true });
-      clicked = true;
-      break;
+    for (const loc of tryOrder) {
+      try {
+        if (await loc.count() === 0) continue;
+        if (!(await loc.isVisible().catch(() => false))) continue;
+        const disabled = await loc.getAttribute('disabled').catch(() => null);
+        const ariaDisabled = await loc.getAttribute('aria-disabled').catch(() => null);
+        if (disabled != null || ariaDisabled === 'true') continue;
+        const txt = (await loc.innerText().catch(() => '')).trim();
+        log.info({ txt }, 'Clic bouton submit');
+        await loc.scrollIntoViewIfNeeded().catch(() => {});
+        await loc.click({ force: true });
+        clicked = true;
+        break;
+      } catch (e) {
+        log.warn({ err: e.message }, 'Tentative submit échouée');
+      }
     }
     if (!clicked) {
       const shot = await screenshot(page, 'no-submit-button');
-      throw new Error(`Bouton "SUMAR/Continuar" introuvable. Screenshot: ${shot}`);
+      // Diag : lister tous les boutons visibles avec leur texte
+      const allBtns = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('button')).map(b => ({
+          text: (b.innerText || '').trim().slice(0, 40),
+          cls: (b.getAttribute('class') || '').slice(0, 60),
+          disabled: b.hasAttribute('disabled'),
+        })).filter(b => b.text);
+      });
+      log.warn({ allBtns }, 'Aucun bouton submit trouvé');
+      throw new Error(`Bouton SUMAR/Continuar introuvable. Boutons visibles: ${JSON.stringify(allBtns.slice(0, 8))}`);
     }
 
     // 6. Formulaire acheteur (best effort — selon Fever)
